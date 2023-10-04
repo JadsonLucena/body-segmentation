@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Body segmentation with TensorFlow</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            font-family: "BROTHER 1816 BOOK";
+
+            -webkit-box-sizing: border-box;
+            -moz-box-sizing: border-box;
+            box-sizing: border-box;
+        }
+        html, body {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        body.loading::after {
+            content: attr(data-state);
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            text-align: center;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: limegreen;
+            font-size: 50px;
+            font-weight: bold;
+
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        video {
+            display: none;
+        }
+        canvas {
+            border: 1px solid #000;
+        }
+    </style>
+
+</head>
+<body data-state="Loading TensorFlow Models" class="loading">
+
+    <label>Ecolha um plano de fundo: <input type="file"></label>
+
+    <br><br>
+
+    <video muted></video>
+    <canvas id="output"></canvas>
+
+    <!-- Load TensorFlow.js --> 
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.3.0/dist/tf.min.js" crossOrigin="Anonymous" id="tensorflow"></script>
+
+    <!-- Load BodyPix -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.1.0/dist/body-pix.min.js" crossOrigin="Anonymous" id="bodypix"></script>
+
+    <script>
+
+        let optimization = 1.5;
+        let width = 1280;
+        let height = 720;
+        
+        let canvas = document.querySelector('canvas');
+            canvas.width = width;
+            canvas.height = height;
+        let ctx = canvas.getContext('2d', {
+            alpha: true,
+            desynchronized: false,
+            willReadFrequently: true
+        });
+        ctx.imageSmoothingEnabled = false;
+        // ctx.imageSmoothingQuality = 'high'; // low, medium, high
+
+        let video = document.querySelector('video');
+            video.width = canvas.width;
+            video.height = canvas.height;
+
+        let offScreen = new OffscreenCanvas(parseInt(canvas.width / optimization), parseInt(canvas.height / optimization));
+        let offScreenCtx = offScreen.getContext('2d', {
+            alpha: true,
+            desynchronized: false,
+            willReadFrequently: true
+        });
+        offScreenCtx.imageSmoothingEnabled = false;
+        // offScreenCtx.imageSmoothingQuality = 'high'; // low, medium, high
+
+        let background = null;
+        document.querySelector('input').onchange = (e) => {
+
+            background = null;
+
+            let img = new Image();
+                img.onload = () => background = img;
+                img.src = URL.createObjectURL(e.target.files[0]);
+
+        };
+
+        (async () => {
+            // tf.setBackend('wasm');
+            tf.setBackend('webgl');
+            
+            const net = await bodyPix.load({
+                architecture: 'MobileNetV1',
+                outputStride: 16, // 8, 16
+                multiplier: 0.75, // 0.50, 0.75, 1.0
+                quantBytes: 4 // 1, 2, 4
+            });
+
+            /*const net = await bodyPix.load({
+                architecture: 'ResNet50',
+                outputStride: 16, // 16, 32
+                quantBytes: 2, // 1, 2, 4
+            });*/
+
+            document.querySelector('body.loading').classList.remove('loading');
+
+            navigator.mediaDevices.getUserMedia = navigator.mediaDevices.getUserMedia || navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+
+            navigator.mediaDevices.getUserMedia({video: { width: { exact: offScreen.width }, height: { exact: offScreen.height } }, audio: false}).then(stream => {
+
+                stream.getVideoTracks()[0].contentHint = 'motion';
+
+                video.srcObject = stream;
+
+                video.oncanplay = () => {
+
+                    video.play().then(() => {
+
+                        const FPS = 24;
+                        async function processVideo(begin) {
+
+                                offScreenCtx.clearRect(0, 0, offScreen.width, offScreen.height);
+                                offScreenCtx.drawImage(
+                                    video,
+                                    0,
+                                    0,
+                                    offScreen.width,
+                                    offScreen.height
+                                );
+                                
+                                let frame = offScreenCtx.getImageData(0, 0, offScreen.width, offScreen.height);
+
+                                await net.segmentPerson(frame, {
+                                    flipHorizontal: false,
+                                    internalResolution: 'full', // low, medium, high, full
+                                    segmentationThreshold: 0.8, // 0.7
+                                    scoreThreshold: 0.01, // 0.4
+                                    maxDetections: 1, // 10
+                                    nmsRadius: 1, // 20
+                                    refineSteps: 10
+                                }).then(segment => {
+
+                                    segment.data.forEach((pix, key) => {
+
+                                        if (pix == 0) {
+
+                                            frame.data[key * 4 + 3] = 0;
+
+                                        }
+
+                                    });
+
+                                    offScreenCtx.putImageData(
+                                        frame,
+                                        0,
+                                        0
+                                    );
+
+                                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                                    ctx.drawImage(
+                                        offScreen,
+                                        0,
+                                        0,
+                                        offScreen.width,
+                                        offScreen.height,
+                                        0,
+                                        0,
+                                        canvas.width,
+                                        canvas.height
+                                    );
+
+                                    if (background != null) {
+
+                                        let canvasW = canvas.width;
+                                        let canvasH = canvas.height;
+                                        let imgW = background.naturalWidth;
+                                        let imgH = background.naturalHeight;
+
+                                        let imgHeight = canvasH;
+                                        let imgWidth = canvasH * (imgW / imgH);
+
+                                        if (canvasW > imgWidth) {
+                                            imgWidth = canvasW;
+                                            imgHeight = canvasW * (imgH / imgW);
+                                        }            
+
+                                        let left = -(imgWidth - canvasW) / 2;
+                                        let top = -(imgHeight - canvasH) / 2;
+
+                                        ctx.globalCompositeOperation = "destination-over";
+
+                                        ctx.drawImage(
+                                            background,
+                                            left,
+                                            top,
+                                            imgWidth,
+                                            imgHeight
+                                        );
+
+                                        ctx.globalCompositeOperation = "source-over";
+
+                                    }
+
+                                });
+
+                            setTimeout(() => processVideo(Date.now()), 1000/FPS - (Date.now() - begin));
+                        };
+                        setTimeout(() => processVideo(Date.now()), 0);
+
+                    });
+
+                };
+
+            });
+
+        })();
+    </script>
+</body>
+</html>
